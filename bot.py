@@ -3,11 +3,23 @@ import config
 import telebot
 import re
 
-questionsFile = "questions.txt"
-stringsFile = "strings.txt"
+questionsFile = "questions"
+stringsFile = "strings"
+known_usersFile = "known_users"
+userPasswordFile = "user_password"
+adminFile = "admin"
+setPasswordCommand = "password"
 
-strings = {}
-questions = {}
+
+class Info: pass
+info = Info()
+
+info.strings = {}
+info.questions = {}
+
+info.known_usersIds = []
+info.adminId = ""
+info.userPassword = ""
 
 
 class Question:
@@ -35,7 +47,32 @@ def parseStrings():
         if 0 < colonPos < len(line) - 1:
             id = line[:colonPos]
             text = line[colonPos + 1:]
-            strings[id] = text
+            info.strings[id] = text
+
+
+def loadUsers():
+
+    try:
+        fUserPassword = open(userPasswordFile, "r")
+        info.userPassword = fUserPassword.read()
+        fUserPassword.close()
+    except FileNotFoundError:
+        fUserPassword = open(userPasswordFile, "w+")
+        fUserPassword.close()
+    try:
+        fUsers = open(known_usersFile, "r")
+        info.known_usersIds = fUsers.read().split(',')
+        fUsers.close()
+    except FileNotFoundError:
+        fUsers = open(known_usersFile, "w+")
+        fUsers.close()
+    try:
+        fAdmin = open(adminFile, "r")
+        info.adminId = fAdmin.read()
+        fAdmin.close()
+    except FileNotFoundError:
+        fAdmin = open(adminFile, "w+")
+        fAdmin.close()
 
 
 def parseQuestions():
@@ -63,7 +100,7 @@ def parseQuestions():
         if matchQuestion:
             qId = prefix
             question = Question(qId, text)
-            questions[qId] = question
+            info.questions[qId] = question
         else:
             sqBracketPos1 = line.find('[')
             sqBracketPos2 = line.find(']')
@@ -76,7 +113,7 @@ def parseQuestions():
             letter = matchAnswer.group(2)
             nextQId = matchAnswer.group(3)
 
-            question = questions.get(qId)
+            question = info.questions.get(qId)
             if question is None:
                 continue
 
@@ -86,6 +123,7 @@ def parseQuestions():
 
 bot = telebot.TeleBot(config.token)
 
+loadUsers()
 parseQuestions()
 parseStrings()
 
@@ -94,8 +132,8 @@ currQuestionForChat = {}
 
 def gameOver(chatId):
 
-    gameOverTxt = strings.get("gameover")
-    restartTxt = strings.get("restart")
+    gameOverTxt = info.strings.get("gameover")
+    restartTxt = info.strings.get("restart")
 
     keyboard = telebot.types.InlineKeyboardMarkup()
     callback_btn = telebot.types.InlineKeyboardButton(text=restartTxt, callback_data="restart")
@@ -105,7 +143,7 @@ def gameOver(chatId):
 
 
 def ask(chatId, qID):
-    question = questions.get(qID)
+    question = info.questions.get(qID)
     if question is None:
         return
 
@@ -130,20 +168,120 @@ def setCurrentQuestionForChat(chatId, qID):
     ask(chatId, qID)
 
 
+def ask_password(chatId):
+    passwordTxt = info.strings.get("password")
+    if passwordTxt is not None:
+        bot.send_message(chatId, passwordTxt)
+
+
 @bot.message_handler(commands=['start'])
 def onStart(message):
-    send_welcome(message.chat.id)
+
+    chatId = message.chat.id
+
+    isAdmin = str(chatId) == info.adminId
+    isUser = str(chatId) in info.known_usersIds
+
+    if isAdmin:
+        hiAdminTxt = info.strings.get("hiadmin")
+        if hiAdminTxt is not None:
+            bot.send_message(chatId, hiAdminTxt)
+
+    if isUser or isAdmin:
+        send_welcome(message.chat.id)
+    else:
+        ask_password(chatId)
 
 
 def send_welcome(chatId):
 
     currQuestionForChat[chatId] = "1"
 
-    introTxt = strings.get("intro")
+    introTxt = info.strings.get("intro")
     if introTxt is not None:
         bot.send_message(chatId, introTxt)
 
     setCurrentQuestionForChat(chatId, "1")
+
+
+def checkPassword(chatId, password):
+
+    if password == config.admin_password:
+        info.adminId = str(chatId)
+        fAdmin = open(adminFile, "w+")
+        fAdmin.write(str(info.adminId))
+        fAdmin.close()
+        return True
+
+    elif password == info.userPassword:
+        info.known_usersIds.append(str(chatId))
+        fUsers = open(known_usersFile, "w+")
+        fUsers.writelines(info.known_usersIds)
+        fUsers.close()
+        return True
+
+    return False
+
+
+def setUserPassword(password):
+    fUserPassword = open(userPasswordFile, "w+")
+    fUserPassword.write(password)
+    fUserPassword.close()
+
+
+@bot.message_handler(content_types=["text"])
+def onMessage(message):
+
+    chatId = message.chat.id
+    text = message.text
+
+    chatIdStr = str(chatId)
+
+    if text == "forget":
+
+        if chatIdStr in info.known_usersIds:
+            info.known_usersIds.remove(chatIdStr)
+            fUsers = open(known_usersFile, "w+")
+            fUsers.writelines(info.known_usersIds)
+            fUsers.close()
+
+        if chatIdStr == info.adminId:
+            info.adminId = ""
+            fAdmin = open(adminFile, "w+")
+            fAdmin.close()
+
+        ask_password(chatId)
+        return
+
+    isAdmin = str(chatId) == info.adminId
+    isUser = str(chatId) in info.known_usersIds
+
+    needPassword = not (isAdmin or isUser)
+
+    if isAdmin:
+        pInd = text.find(setPasswordCommand)
+        if pInd == 0 and len(text) > len(setPasswordCommand) + 1:
+            newPassword = text[len(setPasswordCommand) + 1:]
+            info.userPassword = newPassword
+            setUserPassword(newPassword)
+            passwordChangedTxt = info.strings.get("passwordChangedTxt")
+            bot.send_message(chatId, passwordChangedTxt)
+
+    if needPassword:
+        passOk = checkPassword(chatId, text)
+
+        if not passOk:
+            wrongPassTxt = info.strings.get("wrongpass")
+            bot.send_message(chatId, wrongPassTxt)
+            ask_password(chatId)
+        else:
+            isAdmin = str(chatId) == info.adminId
+            if isAdmin:
+                hiAdminTxt = info.strings.get("hiadmin")
+                if hiAdminTxt is not None:
+                    bot.send_message(chatId, hiAdminTxt)
+
+            send_welcome(chatId)
 
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -153,9 +291,19 @@ def callback_inline(call):
         chatId = call.message.chat.id
 
         if not currQuestionForChat:
-            forgotTxt = strings.get("forgot")
-            bot.send_message(chatId, forgotTxt)
-            send_welcome(chatId)
+            restartedTxt = info.strings.get("restarted")
+            bot.send_message(chatId, restartedTxt)
+
+            chatIdStr = str(chatId)
+
+            isAdmin = chatIdStr == info.adminId
+            isUser = chatIdStr in info.known_usersIds
+            needPassword = not (isAdmin or isUser)
+
+            if needPassword:
+                ask_password(chatId)
+            else:
+                send_welcome(chatId)
             return
 
         if call.data == "restart":
@@ -171,7 +319,7 @@ def callback_inline(call):
         if qId != questionID:
             return
 
-        currQuestion = questions.get(questionID)
+        currQuestion = info.questions.get(questionID)
         answer = currQuestion.answers.get(letter)
 
         if len(answer.replyTxt) > 0:
